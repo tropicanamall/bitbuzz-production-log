@@ -1,177 +1,224 @@
 import streamlit as st
 import pandas as pd
-import json
-import os
 from datetime import datetime
+from streamlit_gsheets import GSheetsConnection
+import altair as alt
 
-# --- 1. 데이터 저장/로드 관련 함수 (파일로 관리) ---
-LOG_FILE = 'bitbuzz_log.csv'
-CONFIG_FILE = 'bitbuzz_config.json'
+# --- 1. Page Configuration ---
+st.set_page_config(page_title="BITBUZZ Production Manager", layout="wide")
+st.title("🚀 BITBUZZ Production Manager v4.0")
 
-# 기본 설정 (파일이 없을 때 초기값)
-DEFAULT_CONFIG = {
-    "employees": ["김철수", "이영희", "박지민"],
-    "channels": ["숏멘토", "댓골", "겉약속근", "스트리트TMI"]
-}
+# --- 2. Google Sheets Connection ---
+conn = st.connection("gsheets", type=GSheetsConnection)
 
-def load_config():
-    """설정(직원, 채널 목록) 불러오기"""
-    if not os.path.exists(CONFIG_FILE):
-        return DEFAULT_CONFIG
-    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-        return json.load(f)
+def get_data(worksheet_name):
+    """Fetch data from Google Sheets"""
+    try:
+        # ttl=0 ensures we always get fresh data
+        df = conn.read(worksheet=worksheet_name, ttl=0)
+        return df
+    except Exception:
+        return pd.DataFrame()
 
-def save_config(config_data):
-    """설정 저장하기"""
-    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-        json.dump(config_data, f, ensure_ascii=False, indent=4)
+def update_data(worksheet_name, df):
+    """Update data to Google Sheets"""
+    conn.update(worksheet=worksheet_name, data=df)
 
-def load_log():
-    """작업 일지 불러오기"""
-    if not os.path.exists(LOG_FILE):
-        return pd.DataFrame(columns=["날짜", "직원명", "채널명", "제목", "링크_URL", "입력시간"])
-    return pd.read_csv(LOG_FILE)
+# --- 3. Load Settings (Staff/Channels) ---
+try:
+    config_df = get_data("config")
+    if config_df.empty or 'employees' not in config_df.columns:
+        # Default settings if empty
+        config_df = pd.DataFrame({
+            "employees": ["Kim", "Lee", "Park"], 
+            "channels": ["Shorts Mentor", "That Goal", "K-Beauty"]
+        })
+        update_data("config", config_df)
+except:
+    config_df = pd.DataFrame({"employees": [], "channels": []})
 
-def save_log(date, name, channel, title, url):
-    """작업 일지 저장하기"""
-    df = load_log()
-    new_data = {
-        "날짜": date,
-        "직원명": name,
-        "채널명": channel,
-        "제목": title,
-        "링크_URL": url,
-        "입력시간": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
-    new_df = pd.concat([df, pd.DataFrame([new_data])], ignore_index=True)
-    new_df.to_csv(LOG_FILE, index=False)
+# Convert to list after removing empty values
+employees_list = config_df['employees'].dropna().unique().tolist()
+channels_list = config_df['channels'].dropna().unique().tolist()
 
-# --- 2. 화면 구성 시작 ---
-st.set_page_config(page_title="BITBUZZ 전산망 v3.0", layout="wide")
-st.title("🎬 BITBUZZ 영상 제작 관리 시스템")
+# --- 4. Load & Preprocess Logs ---
+df_logs = get_data("logs")
 
-# 설정 데이터 로드
-config = load_config()
+# Ensure 'Views' column exists
+if not df_logs.empty:
+    if "Views" not in df_logs.columns:
+        df_logs["Views"] = 0
+        update_data("logs", df_logs)
 
-# 탭 메뉴 만들기 (작업등록 / 현황판 / 관리자설정)
-tab1, tab2, tab3 = st.tabs(["📝 작업 등록", "📊 현황판(대장)", "⚙️ 관리자 설정"])
+# --- 5. Tabs Layout ---
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📊 Dashboard", 
+    "📝 New Entry", 
+    "🗂️ Data & Views", 
+    "⚙️ Settings"
+])
 
-# --- [탭 1] 작업 등록 ---
+# ==========================================
+# [TAB 1] Dashboard (Overview)
+# ==========================================
 with tab1:
-    st.subheader("오늘 만든 영상 기록하기")
+    st.header("📈 Monthly Performance Overview")
     
-    with st.form("entry_form", clear_on_submit=True):
-        col1, col2 = st.columns(2)
-        with col1:
-            input_date = st.date_input("작업 날짜")
-            # 설정 파일에서 불러온 직원 목록 표시
-            input_name = st.selectbox("담당자 (누가 만들었나요?)", config['employees'])
-        with col2:
-            # 설정 파일에서 불러온 채널 목록 표시
-            input_channel = st.selectbox("업로드 채널", config['channels'])
+    if df_logs.empty:
+        st.info("No data available yet. Please add entries in the 'New Entry' tab.")
+    else:
+        # Convert Date column to datetime objects
+        df_logs['Date'] = pd.to_datetime(df_logs['Date'])
         
-        input_title = st.text_input("영상 제목 (리스트에 표시될 이름)")
-        input_url = st.text_input("유튜브 링크 (URL)")
+        # Filter for Current Month
+        current_year = datetime.now().year
+        current_month = datetime.now().month
         
-        submit = st.form_submit_button("등록 완료")
+        this_month_df = df_logs[
+            (df_logs['Date'].dt.year == current_year) & 
+            (df_logs['Date'].dt.month == current_month)
+        ]
         
-        if submit:
-            if input_title and input_url:
-                save_log(input_date, input_name, input_channel, input_title, input_url)
-                st.success(f"{input_name}님의 작업이 등록되었습니다!")
+        # Metrics
+        col_m1, col_m2, col_m3 = st.columns(3)
+        col_m1.metric("📅 Total Videos (This Month)", f"{len(this_month_df)}")
+        col_m2.metric("👥 Active Creators", f"{this_month_df['Staff'].nunique()}")
+        
+        total_views = this_month_df['Views'].sum() if 'Views' in this_month_df.columns else 0
+        col_m3.metric("👀 Total Views (This Month)", f"{total_views:,}")
+        
+        st.divider()
+
+        # Graphs
+        col_g1, col_g2 = st.columns(2)
+        
+        with col_g1:
+            st.subheader("🏆 Top Performers (This Month)")
+            if not this_month_df.empty:
+                emp_counts = this_month_df['Staff'].value_counts().reset_index()
+                emp_counts.columns = ['Staff', 'Count']
+                
+                chart = alt.Chart(emp_counts).mark_bar().encode(
+                    x=alt.X('Staff', sort='-y'),
+                    y='Count',
+                    color='Staff',
+                    tooltip=['Staff', 'Count']
+                ).properties(height=300)
+                st.altair_chart(chart, use_container_width=True)
             else:
-                st.error("제목과 링크를 빠짐없이 입력해주세요.")
+                st.write("No data for this month.")
 
-# --- [탭 2] 현황판 ---
-with tab2:
-    st.subheader("실시간 제작 현황")
-    df = load_log()
-    
-    if not df.empty:
-        # 최신순 정렬
-        df = df.sort_values(by="입력시간", ascending=False)
-        
-        # 필터링 기능 (선택사항)
-        col_filter1, col_filter2 = st.columns(2)
-        with col_filter1:
-            filter_name = st.multiselect("직원별 모아보기", df['직원명'].unique())
-        with col_filter2:
-            filter_channel = st.multiselect("채널별 모아보기", df['채널명'].unique())
+        with col_g2:
+            st.subheader("📅 Monthly Trend (Last 3 Months)")
+            # Group by Month
+            monthly_trend = df_logs.groupby(df_logs['Date'].dt.to_period('M')).size().reset_index(name='Count')
+            monthly_trend['Date'] = monthly_trend['Date'].astype(str)
             
-        if filter_name:
-            df = df[df['직원명'].isin(filter_name)]
-        if filter_channel:
-            df = df[df['채널명'].isin(filter_channel)]
+            line_chart = alt.Chart(monthly_trend).mark_line(point=True).encode(
+                x='Date',
+                y='Count',
+                tooltip=['Date', 'Count']
+            ).properties(height=300)
+            st.altair_chart(line_chart, use_container_width=True)
 
-        # 데이터프레임 표시 (제목 클릭 기능 포함)
-        st.dataframe(
-            df,
+# ==========================================
+# [TAB 2] New Entry (Input)
+# ==========================================
+with tab2:
+    st.subheader("Submit Daily Work")
+    with st.form("entry_form", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        input_date = c1.date_input("Date")
+        input_name = c1.selectbox("Creator Name", employees_list)
+        input_channel = c2.selectbox("Channel", channels_list)
+        
+        input_title = st.text_input("Video Title")
+        input_url = st.text_input("YouTube Link (URL)")
+        
+        if st.form_submit_button("Submit"):
+            if input_title:
+                current_data = get_data("logs")
+                
+                new_row = pd.DataFrame([{
+                    "Date": str(input_date),
+                    "Staff": input_name,
+                    "Channel": input_channel,
+                    "Title": input_title,
+                    "Link": input_url,
+                    "Views": 0,
+                    "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }])
+                
+                updated_logs = pd.concat([current_data, new_row], ignore_index=True)
+                update_data("logs", updated_logs)
+                st.success("Successfully Saved! Check the Dashboard.")
+                st.rerun()
+            else:
+                st.error("Please enter the Video Title.")
+
+# ==========================================
+# [TAB 3] Data & Views (Edit)
+# ==========================================
+with tab3:
+    st.warning("💡 Double-click the 'Views' cell to update view counts. Click 'Save Changes' to apply.")
+    
+    if st.button("🔄 Refresh Data"):
+        st.rerun()
+
+    current_df = get_data("logs")
+    
+    if not current_df.empty:
+        current_df = current_df.sort_values(by="Date", ascending=False)
+
+        edited_df = st.data_editor(
+            current_df,
+            num_rows="dynamic",
             column_config={
-                "제목": st.column_config.LinkColumn(
-                    "영상 제목 (클릭 시 재생)",
-                    display_text=r"https://(www\.)?youtube\.com/.*",
-                    help="클릭하면 유튜브로 이동합니다."
-                ),
-                "링크_URL": None  # URL 열 숨김
+                "Link": st.column_config.LinkColumn("Link"),
+                "Views": st.column_config.NumberColumn("Views (Edit)", format="%d")
             },
             use_container_width=True,
             hide_index=True
         )
+
+        if st.button("💾 Save Changes (Update Views)"):
+            edited_df['Date'] = edited_df['Date'].astype(str)
+            update_data("logs", edited_df)
+            st.success("Data updated in Google Sheets!")
     else:
-        st.info("아직 데이터가 없습니다. '작업 등록' 탭에서 첫 영상을 기록해보세요.")
+        st.write("No records found.")
 
-# --- [탭 3] 관리자 설정 (직원/채널 추가 및 삭제) ---
-with tab3:
-    st.warning("⚠️ 이곳은 직원 및 채널 목록을 관리하는 곳입니다.")
+# ==========================================
+# [TAB 4] Settings (Admin)
+# ==========================================
+with tab4:
+    st.info("Manage Staff and Channel Lists here.")
+    col_s1, col_s2 = st.columns(2)
     
-    col_set1, col_set2 = st.columns(2)
-    
-    # 1. 직원 관리
-    with col_set1:
-        st.markdown("### 👤 직원 관리")
-        current_employees = config['employees']
-        st.write(f"현재 등록된 직원: {', '.join(current_employees)}")
-        
-        # 직원 추가
-        with st.form("add_emp"):
-            new_emp = st.text_input("새 직원 이름 추가")
-            if st.form_submit_button("직원 추가"):
-                if new_emp and new_emp not in config['employees']:
-                    config['employees'].append(new_emp)
-                    save_config(config)
-                    st.success(f"'{new_emp}'님이 추가되었습니다.")
-                    st.rerun() # 화면 새로고침
-        
-        # 직원 삭제
-        with st.form("del_emp"):
-            del_emp = st.selectbox("삭제할 직원 선택", config['employees'])
-            if st.form_submit_button("직원 삭제"):
-                config['employees'].remove(del_emp)
-                save_config(config)
-                st.error(f"'{del_emp}'님이 삭제되었습니다.")
-                st.rerun()
+    with col_s1:
+        st.markdown("#### 👤 Staff List")
+        st.write(", ".join(employees_list))
+        new_emp = st.text_input("Add New Staff", key="add_emp")
+        if st.button("Add Staff"):
+            employees_list.append(new_emp)
+            # Sync lengths
+            max_len = max(len(employees_list), len(channels_list))
+            new_emp_series = pd.Series(employees_list + [None]*(max_len-len(employees_list)))
+            new_ch_series = pd.Series(channels_list + [None]*(max_len-len(channels_list)))
+            new_config = pd.DataFrame({"employees": new_emp_series, "channels": new_ch_series})
+            update_data("config", new_config)
+            st.rerun()
 
-    # 2. 채널 관리
-    with col_set2:
-        st.markdown("### 📺 채널 관리")
-        current_channels = config['channels']
-        st.write(f"현재 등록된 채널: {', '.join(current_channels)}")
-        
-        # 채널 추가
-        with st.form("add_ch"):
-            new_ch = st.text_input("새 채널명 추가")
-            if st.form_submit_button("채널 추가"):
-                if new_ch and new_ch not in config['channels']:
-                    config['channels'].append(new_ch)
-                    save_config(config)
-                    st.success(f"'{new_ch}' 채널이 추가되었습니다.")
-                    st.rerun()
-        
-        # 채널 삭제
-        with st.form("del_ch"):
-            del_ch = st.selectbox("삭제할 채널 선택", config['channels'])
-            if st.form_submit_button("채널 삭제"):
-                config['channels'].remove(del_ch)
-                save_config(config)
-                st.error(f"'{del_ch}' 채널이 삭제되었습니다.")
-                st.rerun()
+    with col_s2:
+        st.markdown("#### 📺 Channel List")
+        st.write(", ".join(channels_list))
+        new_ch = st.text_input("Add New Channel", key="add_ch")
+        if st.button("Add Channel"):
+            channels_list.append(new_ch)
+            # Sync lengths
+            max_len = max(len(employees_list), len(channels_list))
+            new_emp_series = pd.Series(employees_list + [None]*(max_len-len(employees_list)))
+            new_ch_series = pd.Series(channels_list + [None]*(max_len-len(channels_list)))
+            new_config = pd.DataFrame({"employees": new_emp_series, "channels": new_ch_series})
+            update_data("config", new_config)
+            st.rerun()
